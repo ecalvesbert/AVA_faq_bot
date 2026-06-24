@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAQ Assistant</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="header-text">
+        <h1 id="app-title">FAQ Assistant</h1>
+        <p id="app-subtitle">Ask questions about our products and services.</p>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="Main">
+        <button id="tab-chat" class="tab active" type="button" role="tab" aria-selected="true" data-tab="chat">Chat</button>
+        <button id="tab-admin" class="tab" type="button" role="tab" aria-selected="false" data-tab="admin">Admin</button>
+      </nav>
+    </header>
+
+    <!-- Chat panel -->
+    <section id="panel-chat" class="panel panel-chat active" role="tabpanel">
+      <div class="chat-toolbar">
+        <button id="new-chat" class="ghost-button" type="button">New chat</button>
+      </div>
+      <main id="messages" class="messages" aria-live="polite"></main>
+      <form id="composer" class="composer">
+        <textarea
+          id="input"
+          rows="1"
+          placeholder="Type your question..."
+          maxlength="4000"
+          required
+        ></textarea>
+        <button id="send" type="submit" aria-label="Send message">Send</button>
+      </form>
+    </section>
+
+    <!-- Admin panel -->
+    <section id="panel-admin" class="panel panel-admin" role="tabpanel" hidden>
+      <div id="admin-auth" class="admin-card admin-auth hidden">
+        <h2>Admin access</h2>
+        <p class="admin-note">Enter your pipeline API key to manage ingest and content.</p>
+        <form id="admin-key-form" class="admin-key-row">
+          <input id="admin-key-input" type="password" placeholder="Pipeline API key" autocomplete="off">
+          <button class="primary-button" type="submit">Unlock</button>
+        </form>
+      </div>
+
+      <div id="admin-content" class="admin-layout hidden">
+        <section class="admin-card">
+          <div class="admin-card-head">
+            <h2>Manual ingest</h2>
+            <button id="refresh-admin" class="ghost-button" type="button">Refresh</button>
+          </div>
+          <p class="admin-note">Crawl → process → Genesys Knowledge Fabric sync. Nothing runs automatically.</p>
+          <form id="pipeline-form" class="admin-grid admin-grid-2">
+            <label>
+              Site URL
+              <input id="url" type="url" value="https://www.genesys.com/" required>
+            </label>
+            <label>
+              Sync type
+              <select id="sync-type">
+                <option value="Full">Full</option>
+                <option value="Incremental">Incremental</option>
+              </select>
+            </label>
+            <label>
+              Source ID <span class="optional">(optional)</span>
+              <input id="source-id" type="text" placeholder="your-knowledge-source-uuid">
+            </label>
+            <label>
+              Crawl limit
+              <input id="crawl-limit" type="number" min="1" max="500" value="100">
+            </label>
+            <button class="primary-button span-2" type="submit">Start ingest</button>
+          </form>
+        </section>
+
+        <div class="admin-columns">
+          <section class="admin-card">
+            <h2>Recent jobs</h2>
+            <div id="jobs-list" class="jobs-list empty-hint">No jobs yet.</div>
+            <details id="job-detail" class="job-detail hidden">
+              <summary>Job details</summary>
+              <pre id="job-log" class="log"></pre>
+            </details>
+          </section>
+
+          <section class="admin-card">
+            <h2>Genesys sync</h2>
+            <div id="sync-state" class="sync-state empty-hint">No sync state recorded.</div>
+          </section>
+        </div>
+
+        <section class="admin-card">
+          <div class="admin-card-head">
+            <h2>Content store</h2>
+            <div class="layer-toggle">
+              <label><input type="radio" name="layer" value="processed" checked> Processed</label>
+              <label><input type="radio" name="layer" value="raw"> Raw crawl</label>
+            </div>
+          </div>
+          <div class="content-browser">
+            <aside class="content-sidebar">
+              <label class="site-select-label">
+                Site
+                <select id="site-select"></select>
+              </label>
+              <ul id="file-list" class="file-list"></ul>
+            </aside>
+            <article class="content-preview">
+              <header id="preview-title" class="preview-title">Select a file</header>
+              <pre id="preview-body" class="preview-body"></pre>
+            </article>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>

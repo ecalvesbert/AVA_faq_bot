@@ -1,0 +1,25 @@
+.env
+.env.*
+!.env.example
+!.env.railway.example
+*.pem
+.ava-session.json
+~/.gc/
+
+# Local runtime / debug (regenerate with scripts)
+artifacts/crawls/
+artifacts/*.json
+artifacts/knowledge-*.json
+artifacts/firecrawl-*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE / Cursor (optional local tooling)
+.cursor/
+
+# OS
+.DS_Store
