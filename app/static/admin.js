@@ -58,6 +58,47 @@ function saveKey(key) {
   return Boolean(pipelineKey);
 }
 
+function clearKey(message) {
+  pipelineKey = "";
+  localStorage.removeItem(STORAGE_KEY);
+  showAdminUnlocked(false);
+  const note = document.querySelector("#admin-auth .admin-note");
+  if (note) {
+    note.textContent = message
+      || "Enter your pipeline API key to manage ingest and content. Find it in Railway → ava-faq-chat → Variables → PIPELINE_API_KEY.";
+  }
+  document.getElementById("admin-key-input").value = "";
+}
+
+function apiErrorMessage(payload, fallback = "Request failed.") {
+  if (!payload) return fallback;
+  if (typeof payload.detail === "string") return payload.detail;
+  if (Array.isArray(payload.detail)) {
+    return payload.detail.map((item) => item.msg || String(item)).join("; ");
+  }
+  return fallback;
+}
+
+async function adminFetch(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { ...headers(), ...(options.headers || {}) },
+  });
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (response.status === 401) {
+    clearKey(
+      `${apiErrorMessage(payload, "Invalid pipeline API key")} Update the key from Railway → Variables → PIPELINE_API_KEY.`,
+    );
+    throw new Error(apiErrorMessage(payload, "Invalid pipeline API key"));
+  }
+  return { response, payload };
+}
+
 function renderJobs(jobs) {
   const el = document.getElementById("jobs-list");
   if (!jobs.length) {
@@ -111,40 +152,42 @@ function renderJobDetail(job) {
 }
 
 async function loadJobDetail(jobId) {
-  const response = await fetch(`/api/pipeline/jobs/${jobId}`, { headers: headers() });
-  const job = await response.json();
-  if (response.ok) renderJobDetail(job);
+  const { response, payload } = await adminFetch(`/api/pipeline/jobs/${jobId}`);
+  if (response.ok) renderJobDetail(payload);
 }
 
 async function loadJobs() {
-  const response = await fetch("/api/pipeline/jobs", { headers: headers() });
-  const jobs = await response.json();
-  if (response.ok) renderJobs(jobs);
+  const { response, payload } = await adminFetch("/api/pipeline/jobs");
+  if (response.ok) renderJobs(payload);
 }
 
 async function loadSyncState() {
   const el = document.getElementById("sync-state");
-  const response = await fetch("/api/pipeline/sync-state", { headers: headers() });
-  const state = await response.json();
-  if (!response.ok) {
-    el.className = "sync-state empty-hint";
-    el.textContent = "Could not load sync state.";
-    return;
-  }
-  if (!state.sourceId) {
-    el.className = "sync-state empty-hint";
-    el.textContent = "No sync state recorded.";
-    return;
-  }
-  el.className = "sync-state";
-  const last = state.lastSync || {};
-  el.innerHTML = `
+  try {
+    const { response, payload } = await adminFetch("/api/pipeline/sync-state");
+    if (!response.ok) {
+      el.className = "sync-state empty-hint";
+      el.textContent = apiErrorMessage(payload, "Could not load sync state.");
+      return;
+    }
+    if (!payload.sourceId) {
+      el.className = "sync-state empty-hint";
+      el.textContent = "No sync state recorded.";
+      return;
+    }
+    el.className = "sync-state";
+    const last = payload.lastSync || {};
+    el.innerHTML = `
     <dl class="meta-grid">
-      <dt>Source</dt><dd>${state.sourceName || "—"} <code>${state.sourceId}</code></dd>
+      <dt>Source</dt><dd>${payload.sourceName || "—"} <code>${payload.sourceId}</code></dd>
       <dt>Last sync</dt><dd>${formatTime(last.completedAt)}</dd>
       <dt>Files uploaded</dt><dd>${last.fileCount ?? "—"}</dd>
       <dt>Status</dt><dd>${last.finalStatus || "—"} / ${last.ingestionStatus || "—"}</dd>
     </dl>`;
+  } catch {
+    el.className = "sync-state empty-hint";
+    el.textContent = "Could not load sync state.";
+  }
 }
 
 function renderSites(sites) {
@@ -163,9 +206,12 @@ function renderSites(sites) {
 }
 
 async function loadSites() {
-  const response = await fetch("/api/content/sites", { headers: headers() });
-  const sites = await response.json();
-  if (response.ok) renderSites(sites);
+  try {
+    const { response, payload } = await adminFetch("/api/content/sites");
+    if (response.ok) renderSites(payload);
+  } catch {
+    /* auth handler already cleared the saved key */
+  }
 }
 
 async function loadFilesForSite() {
@@ -174,27 +220,29 @@ async function loadFilesForSite() {
   if (!selectedSite) return;
 
   const processed = isProcessedLayer();
-  const response = await fetch(
-    `/api/content/sites/${encodeURIComponent(selectedSite)}/files?processed=${processed}`,
-    { headers: headers() },
-  );
-  const payload = await response.json();
-  const list = document.getElementById("file-list");
-  const files = payload.files || [];
-  if (!files.length) {
-    list.innerHTML = '<li class="empty-hint">No files in this layer.</li>';
-    return;
-  }
-  list.innerHTML = files
-    .map(
-      (name) =>
-        `<li><button type="button" class="file-item${name === selectedFile ? " active" : ""}" data-file="${name}">${name}</button></li>`,
-    )
-    .join("");
+  try {
+    const { response, payload } = await adminFetch(
+      `/api/content/sites/${encodeURIComponent(selectedSite)}/files?processed=${processed}`,
+    );
+    const list = document.getElementById("file-list");
+    const files = payload.files || [];
+    if (!files.length) {
+      list.innerHTML = '<li class="empty-hint">No files in this layer.</li>';
+      return;
+    }
+    list.innerHTML = files
+      .map(
+        (name) =>
+          `<li><button type="button" class="file-item${name === selectedFile ? " active" : ""}" data-file="${name}">${name}</button></li>`,
+      )
+      .join("");
 
-  list.querySelectorAll(".file-item").forEach((btn) => {
-    btn.addEventListener("click", () => previewFile(btn.dataset.file));
-  });
+    list.querySelectorAll(".file-item").forEach((btn) => {
+      btn.addEventListener("click", () => previewFile(btn.dataset.file));
+    });
+  } catch {
+    /* auth handler already cleared the saved key */
+  }
 }
 
 async function previewFile(filename) {
@@ -204,30 +252,35 @@ async function previewFile(filename) {
   });
 
   const processed = isProcessedLayer();
-  const response = await fetch(
-    `/api/content/sites/${encodeURIComponent(selectedSite)}/files/${encodeURIComponent(filename)}?processed=${processed}`,
-    { headers: headers() },
-  );
-  const payload = await response.json();
-  document.getElementById("preview-title").textContent = filename;
-  document.getElementById("preview-body").textContent = response.ok
-    ? payload.content
-    : payload.detail || "Could not load file.";
+  try {
+    const { response, payload } = await adminFetch(
+      `/api/content/sites/${encodeURIComponent(selectedSite)}/files/${encodeURIComponent(filename)}?processed=${processed}`,
+    );
+    document.getElementById("preview-title").textContent = filename;
+    document.getElementById("preview-body").textContent = response.ok
+      ? payload.content
+      : apiErrorMessage(payload, "Could not load file.");
+  } catch (error) {
+    document.getElementById("preview-body").textContent = error.message;
+  }
 }
 
 async function pollJob(jobId) {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(async () => {
-    const response = await fetch(`/api/pipeline/jobs/${jobId}`, { headers: headers() });
-    const job = await response.json();
-    if (response.ok) {
-      renderJobDetail(job);
-      await loadJobs();
-    }
-    if (job.status === "completed" || job.status === "failed") {
+    try {
+      const { response, payload } = await adminFetch(`/api/pipeline/jobs/${jobId}`);
+      if (response.ok) {
+        renderJobDetail(payload);
+        await loadJobs();
+      }
+      if (payload.status === "completed" || payload.status === "failed") {
+        clearInterval(pollTimer);
+        await loadSites();
+        await loadSyncState();
+      }
+    } catch {
       clearInterval(pollTimer);
-      await loadSites();
-      await loadSyncState();
     }
   }, 2500);
 }
@@ -248,10 +301,23 @@ export function initAdmin(config) {
     showAdminUnlocked(true);
   }
 
-  keyForm.addEventListener("submit", (event) => {
+  keyForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = document.getElementById("admin-key-input");
-    if (saveKey(input.value)) refreshAll();
+    if (!saveKey(input.value)) return;
+    try {
+      await loadJobs();
+    } catch (error) {
+      document.getElementById("job-log").textContent = error.message;
+      document.getElementById("job-detail").classList.remove("hidden");
+      return;
+    }
+    refreshAll();
+  });
+
+  document.getElementById("clear-admin-key").addEventListener("click", () => {
+    clearKey();
+    document.getElementById("admin-key-input").focus();
   });
 
   pipelineForm.addEventListener("submit", async (event) => {
@@ -269,17 +335,22 @@ export function initAdmin(config) {
     document.getElementById("job-log").textContent = "Starting pipeline...";
     document.getElementById("job-detail").classList.remove("hidden");
 
-    const response = await fetch("/api/pipeline/run", {
-      method: "POST",
-      headers: headers(),
-      body: JSON.stringify(body),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      document.getElementById("job-log").textContent = JSON.stringify(payload, null, 2);
-      return;
+    try {
+      const { response, payload } = await adminFetch("/api/pipeline/run", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        document.getElementById("job-log").textContent = apiErrorMessage(
+          payload,
+          "Could not start ingest.",
+        );
+        return;
+      }
+      pollJob(payload.jobId);
+    } catch (error) {
+      document.getElementById("job-log").textContent = error.message;
     }
-    pollJob(payload.jobId);
   });
 
   document.getElementById("refresh-admin").addEventListener("click", refreshAll);

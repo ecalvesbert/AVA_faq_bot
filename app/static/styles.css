@@ -151,7 +151,28 @@ button[type="submit"]:disabled,
   padding: 12px 16px;
   border-radius: 18px;
   line-height: 1.5;
+}
+
+.message-body {
   white-space: pre-wrap;
+}
+
+.message-meta {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.message.assistant.pending .message-meta {
+  color: var(--accent-dark);
+  border-top-color: rgba(255, 69, 26, 0.2);
+}
+
+.message-meta.error {
+  color: #b42318;
 }
 
 .message.user {
@@ -173,27 +194,6 @@ button[type="submit"]:disabled,
 
 .message a:hover {
   text-decoration: underline;
-}
-
-.turn-metrics {
-  font-size: 0.8125rem;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted, #5c6470);
-  background: rgba(255, 255, 255, 0.72);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 8px 14px;
-  text-align: center;
-}
-
-.turn-metrics.waiting {
-  color: var(--accent-dark, #c93a12);
-  border-color: rgba(255, 69, 26, 0.25);
-  background: rgba(255, 69, 26, 0.06);
-}
-
-.turn-metrics.hidden {
-  display: none;
 }
 
 .composer {
@@ -280,6 +280,11 @@ button[type="submit"]:disabled,
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.admin-toolbar {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .admin-card-head {

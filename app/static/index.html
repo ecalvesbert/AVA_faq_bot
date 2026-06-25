@@ -25,7 +25,6 @@
         <button id="new-chat" class="ghost-button" type="button">New chat</button>
       </div>
       <main id="messages" class="messages" aria-live="polite"></main>
-      <div id="turn-metrics" class="turn-metrics hidden" aria-live="polite" aria-atomic="true"></div>
       <form id="composer" class="composer">
         <textarea
           id="input"
@@ -42,7 +41,7 @@
     <section id="panel-admin" class="panel panel-admin" role="tabpanel" hidden>
       <div id="admin-auth" class="admin-card admin-auth hidden">
         <h2>Admin access</h2>
-        <p class="admin-note">Enter your pipeline API key to manage ingest and content.</p>
+        <p class="admin-note">Enter your pipeline API key to manage ingest and content. Find it in Railway → ava-faq-chat → Variables → <code>PIPELINE_API_KEY</code>.</p>
         <form id="admin-key-form" class="admin-key-row">
           <input id="admin-key-input" type="password" placeholder="Pipeline API key" autocomplete="off">
           <button class="primary-button" type="submit">Unlock</button>
@@ -50,6 +49,9 @@
       </div>
 
       <div id="admin-content" class="admin-layout hidden">
+        <div class="admin-toolbar">
+          <button id="clear-admin-key" class="ghost-button" type="button">Change API key</button>
+        </div>
         <section class="admin-card">
           <div class="admin-card-head">
             <h2>Manual ingest</h2>

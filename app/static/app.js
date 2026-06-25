@@ -7,7 +7,6 @@ const sendEl = document.getElementById("send");
 const newChatEl = document.getElementById("new-chat");
 const titleEl = document.getElementById("app-title");
 const subtitleEl = document.getElementById("app-subtitle");
-const turnMetricsEl = document.getElementById("turn-metrics");
 
 let sessionId = null;
 let chatKey = null;
@@ -15,6 +14,7 @@ let busy = false;
 let appConfig = {};
 let turnTimerInterval = null;
 let turnTimerStart = null;
+let pendingAssistantBubble = null;
 
 function headers() {
   const value = { "Content-Type": "application/json" };
@@ -40,15 +40,53 @@ function formatAssistantHtml(text) {
   );
 }
 
+function createAssistantBubble({ pending = false } = {}) {
+  const bubble = document.createElement("div");
+  bubble.className = `message assistant${pending ? " pending" : ""}`;
+
+  const body = document.createElement("div");
+  body.className = "message-body";
+
+  const meta = document.createElement("div");
+  meta.className = "message-meta";
+  meta.hidden = true;
+
+  bubble.append(body, meta);
+  messagesEl.appendChild(bubble);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return { bubble, body, meta };
+}
+
 function appendMessage(role, text) {
+  if (role === "assistant") {
+    const { body } = createAssistantBubble();
+    body.innerHTML = formatAssistantHtml(text);
+    return;
+  }
+
   const bubble = document.createElement("div");
   bubble.className = `message ${role}`;
-  if (role === "assistant") {
-    bubble.innerHTML = formatAssistantHtml(text);
-  } else {
-    bubble.textContent = text;
-  }
+  bubble.textContent = text;
   messagesEl.appendChild(bubble);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function finalizeAssistantBubble(body, meta, text, snapshot = {}) {
+  const { responseTimeMs, outputTokens, error } = snapshot;
+  body.innerHTML = formatAssistantHtml(text);
+  meta.hidden = false;
+
+  if (error) {
+    const elapsed = turnTimerStart ? performance.now() - turnTimerStart : 0;
+    meta.textContent = `Failed after ${formatMs(elapsed)} · ${error}`;
+    meta.classList.add("error");
+  } else {
+    meta.textContent = `${formatMs(responseTimeMs)} · ${Number(outputTokens).toLocaleString()} tokens generated`;
+    meta.classList.remove("error");
+  }
+
+  pendingAssistantBubble?.bubble.classList.remove("pending");
+  pendingAssistantBubble = null;
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -63,39 +101,27 @@ function formatMs(ms) {
 }
 
 function startTurnTimer() {
-  stopTurnTimer(false);
+  stopTurnTimer();
   turnTimerStart = performance.now();
-  turnMetricsEl.classList.remove("hidden");
-  turnMetricsEl.classList.add("waiting");
-  turnMetricsEl.textContent = "Waiting… 0 ms";
+  pendingAssistantBubble = createAssistantBubble({ pending: true });
+  const { body, meta } = pendingAssistantBubble;
+  body.textContent = "Thinking…";
+  meta.hidden = false;
+  meta.textContent = "0 ms";
+
   turnTimerInterval = window.setInterval(() => {
+    if (!pendingAssistantBubble) return;
     const elapsed = performance.now() - turnTimerStart;
-    turnMetricsEl.textContent = `Waiting… ${formatMs(elapsed)}`;
+    pendingAssistantBubble.meta.textContent = formatMs(elapsed);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
   }, 10);
 }
 
-function stopTurnTimer(showSnapshot, snapshot = {}) {
+function stopTurnTimer() {
   if (turnTimerInterval !== null) {
     clearInterval(turnTimerInterval);
     turnTimerInterval = null;
   }
-
-  turnMetricsEl.classList.remove("waiting");
-
-  if (!showSnapshot) {
-    return;
-  }
-
-  const { responseTimeMs, outputTokens, error } = snapshot;
-  turnMetricsEl.classList.remove("hidden");
-
-  if (error) {
-    const elapsed = turnTimerStart ? performance.now() - turnTimerStart : 0;
-    turnMetricsEl.textContent = `Failed after ${formatMs(elapsed)} · ${error}`;
-    return;
-  }
-
-  turnMetricsEl.textContent = `${formatMs(responseTimeMs)} · ${Number(outputTokens).toLocaleString()} tokens generated`;
 }
 
 function switchTab(tab) {
@@ -132,9 +158,8 @@ async function loadConfig() {
 
 async function startSession() {
   messagesEl.innerHTML = "";
-  stopTurnTimer(false);
-  turnMetricsEl.classList.add("hidden");
-  turnMetricsEl.textContent = "";
+  stopTurnTimer();
+  pendingAssistantBubble = null;
   setBusy(true);
   try {
     const response = await fetch("/api/chat/session", {
@@ -173,15 +198,29 @@ async function sendMessage(event) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Message failed");
-    appendMessage("assistant", payload.text);
-    stopTurnTimer(true, {
-      responseTimeMs:
-        payload.responseTimeMs ?? performance.now() - turnTimerStart,
-      outputTokens: payload.outputTokens ?? 0,
-    });
+    stopTurnTimer();
+    finalizeAssistantBubble(
+      pendingAssistantBubble.body,
+      pendingAssistantBubble.meta,
+      payload.text,
+      {
+        responseTimeMs:
+          payload.responseTimeMs ?? performance.now() - turnTimerStart,
+        outputTokens: payload.outputTokens ?? 0,
+      },
+    );
   } catch (error) {
-    appendMessage("assistant", `Something went wrong: ${error.message}`);
-    stopTurnTimer(true, { error: error.message });
+    stopTurnTimer();
+    if (pendingAssistantBubble) {
+      finalizeAssistantBubble(
+        pendingAssistantBubble.body,
+        pendingAssistantBubble.meta,
+        `Something went wrong: ${error.message}`,
+        { error: error.message },
+      );
+    } else {
+      appendMessage("assistant", `Something went wrong: ${error.message}`);
+    }
   } finally {
     setBusy(false);
     inputEl.focus();
