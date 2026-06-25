@@ -44,6 +44,14 @@ def extract_agent_text(turn: dict[str, Any]) -> str:
     return " ".join(parts).strip()
 
 
+def estimate_output_tokens(text: str) -> int:
+    """Rough token count when the AVA API does not return usage metadata."""
+    cleaned = text.strip()
+    if not cleaned:
+        return 0
+    return max(1, (len(cleaned) + 3) // 4)
+
+
 def _token_and_env() -> tuple[str, str]:
     client_id, client_secret, environment = resolve_config(os.getenv("GENESYS_PROFILE", "default"))
     token = get_access_token(client_id, client_secret, environment)

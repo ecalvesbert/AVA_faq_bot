@@ -7,11 +7,14 @@ const sendEl = document.getElementById("send");
 const newChatEl = document.getElementById("new-chat");
 const titleEl = document.getElementById("app-title");
 const subtitleEl = document.getElementById("app-subtitle");
+const turnMetricsEl = document.getElementById("turn-metrics");
 
 let sessionId = null;
 let chatKey = null;
 let busy = false;
 let appConfig = {};
+let turnTimerInterval = null;
+let turnTimerStart = null;
 
 function headers() {
   const value = { "Content-Type": "application/json" };
@@ -55,6 +58,46 @@ function setBusy(next) {
   inputEl.disabled = next;
 }
 
+function formatMs(ms) {
+  return `${Math.round(ms).toLocaleString()} ms`;
+}
+
+function startTurnTimer() {
+  stopTurnTimer(false);
+  turnTimerStart = performance.now();
+  turnMetricsEl.classList.remove("hidden");
+  turnMetricsEl.classList.add("waiting");
+  turnMetricsEl.textContent = "Waiting… 0 ms";
+  turnTimerInterval = window.setInterval(() => {
+    const elapsed = performance.now() - turnTimerStart;
+    turnMetricsEl.textContent = `Waiting… ${formatMs(elapsed)}`;
+  }, 10);
+}
+
+function stopTurnTimer(showSnapshot, snapshot = {}) {
+  if (turnTimerInterval !== null) {
+    clearInterval(turnTimerInterval);
+    turnTimerInterval = null;
+  }
+
+  turnMetricsEl.classList.remove("waiting");
+
+  if (!showSnapshot) {
+    return;
+  }
+
+  const { responseTimeMs, outputTokens, error } = snapshot;
+  turnMetricsEl.classList.remove("hidden");
+
+  if (error) {
+    const elapsed = turnTimerStart ? performance.now() - turnTimerStart : 0;
+    turnMetricsEl.textContent = `Failed after ${formatMs(elapsed)} · ${error}`;
+    return;
+  }
+
+  turnMetricsEl.textContent = `${formatMs(responseTimeMs)} · ${Number(outputTokens).toLocaleString()} tokens generated`;
+}
+
 function switchTab(tab) {
   const isChat = tab === "chat";
   document.getElementById("panel-chat").classList.toggle("active", isChat);
@@ -89,6 +132,9 @@ async function loadConfig() {
 
 async function startSession() {
   messagesEl.innerHTML = "";
+  stopTurnTimer(false);
+  turnMetricsEl.classList.add("hidden");
+  turnMetricsEl.textContent = "";
   setBusy(true);
   try {
     const response = await fetch("/api/chat/session", {
@@ -117,6 +163,7 @@ async function sendMessage(event) {
   appendMessage("user", message);
   inputEl.value = "";
   setBusy(true);
+  startTurnTimer();
 
   try {
     const response = await fetch("/api/chat/message", {
@@ -127,8 +174,14 @@ async function sendMessage(event) {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.detail || "Message failed");
     appendMessage("assistant", payload.text);
+    stopTurnTimer(true, {
+      responseTimeMs:
+        payload.responseTimeMs ?? performance.now() - turnTimerStart,
+      outputTokens: payload.outputTokens ?? 0,
+    });
   } catch (error) {
     appendMessage("assistant", `Something went wrong: ${error.message}`);
+    stopTurnTimer(true, { error: error.message });
   } finally {
     setBusy(false);
     inputEl.focus();

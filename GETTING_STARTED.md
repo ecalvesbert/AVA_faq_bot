@@ -74,6 +74,8 @@ export USE_GC_PROFILE=1               # or set GENESYS_CLIENT_ID/SECRET
 
 Script creates project, deploys Docker image, sets env vars, mounts `/data` volume, prints **PIPELINE_API_KEY**.
 
+**Ongoing deploys:** push to `main` triggers GitHub Actions → Railway (see [docs/cicd-railway.md](docs/cicd-railway.md)). One-time: add `RAILWAY_TOKEN` project secret to GitHub.
+
 Sync existing local crawls to production:
 
 ```bash

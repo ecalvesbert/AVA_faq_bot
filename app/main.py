@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -34,6 +35,8 @@ class MessageResponse(BaseModel):
     text: str
     turnId: Optional[str] = None
     nextAction: Optional[str] = None
+    responseTimeMs: int = 0
+    outputTokens: int = 0
 
 
 class PipelineRunRequest(BaseModel):
@@ -111,15 +114,20 @@ def send_chat_message(body: MessageRequest, _: None = Depends(require_chat_key))
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
     try:
+        started = time.perf_counter()
         turn = genesys_ava.send_message(session, body.message.strip())
+        response_time_ms = int((time.perf_counter() - started) * 1000)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     text = genesys_ava.extract_agent_text(turn)
+    reply = text or "I don't have a response for that yet."
     return MessageResponse(
-        text=text or "I don't have a response for that yet.",
+        text=reply,
         turnId=turn.get("id"),
         nextAction=(turn.get("nextAction") or {}).get("type"),
+        responseTimeMs=response_time_ms,
+        outputTokens=genesys_ava.estimate_output_tokens(reply),
     )
 
 

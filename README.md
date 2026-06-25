@@ -58,6 +58,8 @@ export USE_GC_PROFILE=1
 ./deploy_railway.sh
 ```
 
+**CI/CD:** push to `main` auto-deploys via GitHub Actions once you add a `RAILWAY_TOKEN` secret. See [docs/cicd-railway.md](docs/cicd-railway.md).
+
 Ingest is **manual only** — use the **Admin** tab → **Start ingest**. See [GETTING_STARTED.md](GETTING_STARTED.md) §5.
 
 Push local crawls to a deployed app:

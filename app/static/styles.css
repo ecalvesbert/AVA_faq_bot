@@ -175,6 +175,27 @@ button[type="submit"]:disabled,
   text-decoration: underline;
 }
 
+.turn-metrics {
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #5c6470);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 14px;
+  text-align: center;
+}
+
+.turn-metrics.waiting {
+  color: var(--accent-dark, #c93a12);
+  border-color: rgba(255, 69, 26, 0.25);
+  background: rgba(255, 69, 26, 0.06);
+}
+
+.turn-metrics.hidden {
+  display: none;
+}
+
 .composer {
   display: grid;
   grid-template-columns: 1fr auto;
