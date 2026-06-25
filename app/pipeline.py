@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
+
+PipelineStep = Literal["crawl", "process", "sync"]
 
 from app.config import (
     crawl_dir_for_url,
@@ -56,26 +59,57 @@ def list_jobs(limit: int = 20) -> list[dict[str, Any]]:
     return jobs
 
 
+def _append_step_output(step: dict[str, Any], key: str, chunk: str) -> None:
+    current = step.get(key) or ""
+    step[key] = (current + chunk)[-4000:]
+
+
 def _run_step(job: dict[str, Any], name: str, command: list[str]) -> None:
-    step = {"name": name, "status": "running", "startedAt": _utc_now()}
+    step: dict[str, Any] = {
+        "name": name,
+        "status": "running",
+        "startedAt": _utc_now(),
+        "stdout": "",
+        "stderr": "",
+    }
     job["steps"].append(step)
     save_job(job)
 
-    result = subprocess.run(
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(
         command,
         cwd=_REPO_ROOT,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
+        env=env,
     )
-    step["finishedAt"] = _utc_now()
-    step["exitCode"] = result.returncode
-    step["stdout"] = result.stdout[-4000:] if result.stdout else ""
-    step["stderr"] = result.stderr[-4000:] if result.stderr else ""
 
-    if result.returncode != 0:
+    def read_stream(stream: Any, key: str) -> None:
+        for line in iter(stream.readline, ""):
+            with _lock:
+                _append_step_output(step, key, line)
+                save_job(job)
+        stream.close()
+
+    threads = [
+        threading.Thread(target=read_stream, args=(proc.stdout, "stdout"), daemon=True),
+        threading.Thread(target=read_stream, args=(proc.stderr, "stderr"), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    returncode = proc.wait()
+    step["finishedAt"] = _utc_now()
+    step["exitCode"] = returncode
+
+    if returncode != 0:
         step["status"] = "failed"
         save_job(job)
-        raise RuntimeError(f"{name} failed (exit {result.returncode}): {result.stderr or result.stdout}")
+        raise RuntimeError(f"{name} failed (exit {returncode}): {step.get('stderr') or step.get('stdout')}")
 
     step["status"] = "completed"
     save_job(job)
@@ -85,24 +119,63 @@ def _site_key(url: str) -> str:
     return urlparse(url).netloc.replace(":", "-") or "site"
 
 
+def _site_dir(site: str) -> Path:
+    if not site or "/" in site or "\\" in site or ".." in site:
+        raise ValueError("Invalid site name")
+    return data_dir() / "crawls" / site
+
+
+def _safe_filename(filename: str) -> str:
+    name = filename.strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        raise ValueError("Invalid filename")
+    return name
+
+
+def _resolve_pipeline_paths(
+    *,
+    url: str | None,
+    site: str | None,
+) -> tuple[str, Path, Path]:
+    if site:
+        site_key = site.strip()
+        crawl_dir = _site_dir(site_key)
+    elif url:
+        site_key = _site_key(url)
+        crawl_dir = crawl_dir_for_url(url)
+    else:
+        raise ValueError("Provide url or site")
+
+    processed_dir = crawl_dir / "processed"
+    return site_key, crawl_dir, processed_dir
+
+
 def run_pipeline(
     *,
-    url: str,
+    url: str | None = None,
+    site: str | None = None,
     sync_type: str = "Full",
     source_id: str | None = None,
     source_name: str = "genesys-com-ava-faq",
     crawl_limit: int = 100,
+    steps: list[PipelineStep] | None = None,
 ) -> str:
+    selected_steps = steps or ["crawl", "process", "sync"]
+    if not selected_steps:
+        raise ValueError("At least one pipeline step is required")
+    if "crawl" in selected_steps and not url:
+        raise ValueError("url is required for the crawl step")
+
+    site_key, crawl_dir, processed_dir = _resolve_pipeline_paths(url=url, site=site)
     job_id = str(uuid.uuid4())
-    crawl_dir = crawl_dir_for_url(url)
-    processed_dir = processed_dir_for_url(url)
 
     job: dict[str, Any] = {
         "id": job_id,
         "status": "pending",
-        "url": url,
-        "site": _site_key(url),
+        "url": url or f"https://{site_key}/",
+        "site": site_key,
         "syncType": sync_type,
+        "stepsRequested": selected_steps,
         "crawlDir": str(crawl_dir),
         "processedDir": str(processed_dir),
         "createdAt": _utc_now(),
@@ -121,59 +194,68 @@ def run_pipeline(
             data_dir().mkdir(parents=True, exist_ok=True)
             crawl_dir.mkdir(parents=True, exist_ok=True)
 
-            if not os.getenv("FIRECRAWL_API_KEY", "").strip():
-                on_railway = bool(
-                    os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")
+            if "crawl" in selected_steps:
+                if not os.getenv("FIRECRAWL_API_KEY", "").strip():
+                    on_railway = bool(
+                        os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")
+                    )
+                    if on_railway:
+                        raise RuntimeError(
+                            "FIRECRAWL_API_KEY is required for crawls on Railway. "
+                            "Add it in Railway → ava-faq-chat → Variables, then retry ingest."
+                        )
+
+                _run_step(
+                    job,
+                    "crawl",
+                    [
+                        sys.executable,
+                        "firecrawl_demo.py",
+                        "crawl-shallow",
+                        url or f"https://{site_key}/",
+                        "--output-dir",
+                        str(crawl_dir),
+                        "--limit",
+                        str(crawl_limit),
+                    ],
                 )
-                if on_railway:
+
+            if "process" in selected_steps:
+                _run_step(
+                    job,
+                    "process",
+                    [
+                        sys.executable,
+                        "process_crawl.py",
+                        "--input-dir",
+                        str(crawl_dir),
+                        "--output-dir",
+                        str(processed_dir),
+                    ],
+                )
+
+            if "sync" in selected_steps:
+                if not processed_dir.exists() or not any(processed_dir.glob("*.md")):
                     raise RuntimeError(
-                        "FIRECRAWL_API_KEY is required for crawls on Railway. "
-                        "Add it in Railway → ava-faq-chat → Variables, then retry ingest."
+                        f"No processed content for {site_key}. Run process or full ingest first."
                     )
 
-            _run_step(
-                job,
-                "crawl",
-                [
+                sync_cmd = [
                     sys.executable,
-                    "firecrawl_demo.py",
-                    "crawl-shallow",
-                    url,
-                    "--output-dir",
-                    str(crawl_dir),
-                    "--limit",
-                    str(crawl_limit),
-                ],
-            )
-            _run_step(
-                job,
-                "process",
-                [
-                    sys.executable,
-                    "process_crawl.py",
+                    "sync_faq_to_genesys.py",
                     "--input-dir",
-                    str(crawl_dir),
-                    "--output-dir",
                     str(processed_dir),
-                ],
-            )
+                    "--state-file",
+                    str(knowledge_sync_state_path()),
+                    "--source-name",
+                    source_name,
+                    "--sync-type",
+                    sync_type,
+                ]
+                if source_id:
+                    sync_cmd.extend(["--source-id", source_id])
 
-            sync_cmd = [
-                sys.executable,
-                "sync_faq_to_genesys.py",
-                "--input-dir",
-                str(processed_dir),
-                "--state-file",
-                str(knowledge_sync_state_path()),
-                "--source-name",
-                source_name,
-                "--sync-type",
-                sync_type,
-            ]
-            if source_id:
-                sync_cmd.extend(["--source-id", source_id])
-
-            _run_step(job, "sync", sync_cmd)
+                _run_step(job, "sync", sync_cmd)
 
             job["status"] = "completed"
             job["finishedAt"] = _utc_now()
@@ -220,14 +302,45 @@ def list_sites() -> list[dict[str, Any]]:
     return sites
 
 
+def _content_file_path(site: str, filename: str, *, processed: bool) -> Path:
+    base = _site_dir(site).resolve()
+    name = _safe_filename(filename)
+    relative = f"processed/{name}" if processed else name
+    target = (base / relative).resolve()
+    if not str(target).startswith(str(base)):
+        raise ValueError("Invalid path")
+    return target
+
+
 def read_content_file(site: str, relative_path: str) -> str:
-    base = data_dir() / "crawls" / site
+    base = _site_dir(site).resolve()
     target = (base / relative_path).resolve()
-    if not str(target).startswith(str(base.resolve())):
+    if not str(target).startswith(str(base)):
         raise ValueError("Invalid path")
     if not target.exists() or not target.is_file():
         raise FileNotFoundError(relative_path)
     return target.read_text(encoding="utf-8")
+
+
+def write_content_file(site: str, filename: str, content: str, *, processed: bool) -> None:
+    target = _content_file_path(site, filename, processed=processed)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+
+
+def delete_content_file(site: str, filename: str, *, processed: bool) -> None:
+    target = _content_file_path(site, filename, processed=processed)
+    if not target.exists():
+        raise FileNotFoundError(filename)
+    target.unlink()
+
+
+def delete_site(site: str) -> dict[str, Any]:
+    site_dir = _site_dir(site)
+    if not site_dir.exists():
+        raise FileNotFoundError(site)
+    shutil.rmtree(site_dir)
+    return {"deleted": True, "site": site}
 
 
 def load_sync_state() -> dict[str, Any]:

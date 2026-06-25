@@ -3,8 +3,12 @@ const STORAGE_KEY = "pipelineApiKey";
 let pipelineKey = localStorage.getItem(STORAGE_KEY) || "";
 let pipelineKeyRequired = true;
 let pollTimer = null;
+let pollingJobId = null;
 let selectedSite = null;
 let selectedFile = null;
+let sitesCache = [];
+let editMode = false;
+let currentFileContent = "";
 
 function headers() {
   return {
@@ -24,6 +28,48 @@ function formatTime(iso) {
   } catch {
     return iso;
   }
+}
+
+function formatElapsed(startedAt) {
+  if (!startedAt) return "";
+  const ms = Date.now() - new Date(startedAt).getTime();
+  if (ms < 0) return "";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  return `${min}m ${sec % 60}s`;
+}
+
+function stepStatusLine(step) {
+  let line = `• ${step.name}: ${step.status}`;
+  if (step.status === "running" && step.startedAt) {
+    line += ` (${formatElapsed(step.startedAt)} elapsed)`;
+  }
+  if (step.exitCode != null) line += ` (exit ${step.exitCode})`;
+  return line;
+}
+
+function stepLogSections(steps) {
+  return (steps || [])
+    .filter((step) => step.stdout || step.stderr)
+    .map((step) => {
+      const parts = [`--- ${step.name} log ---`];
+      if (step.stdout) parts.push(String(step.stdout).trimEnd());
+      if (step.stderr) parts.push(String(step.stderr).trimEnd());
+      return parts.join("\n");
+    });
+}
+
+function runningStepHint(steps) {
+  const running = (steps || []).find((step) => step.status === "running");
+  if (!running) return "";
+  if (running.name === "sync") {
+    return "\nSync uploads each processed page to Genesys Knowledge Fabric. Large sites can take several minutes — live upload progress appears below as files are sent.\n";
+  }
+  if (running.name === "crawl") {
+    return "\nCrawl is fetching pages from the site. Progress appears below when the crawler emits output.\n";
+  }
+  return `\n${running.name} is running. Live output appears below when available.\n`;
 }
 
 function statusBadge(status) {
@@ -230,12 +276,8 @@ function renderJobDetail(job) {
   detail.classList.remove("hidden");
   detail.open = true;
 
-  const steps = (job.steps || [])
-    .map(
-      (s) =>
-        `• ${s.name}: ${s.status}${s.exitCode != null ? ` (exit ${s.exitCode})` : ""}`,
-    )
-    .join("\n");
+  const steps = (job.steps || []).map(stepStatusLine).join("\n");
+  const logs = stepLogSections(job.steps).join("\n\n");
 
   log.textContent = [
     `Status: ${job.status}`,
@@ -244,6 +286,8 @@ function renderJobDetail(job) {
     `Created: ${formatTime(job.createdAt)}`,
     job.error ? `Error: ${job.error}` : "",
     steps ? `\nSteps:\n${steps}` : "",
+    runningStepHint(job.steps),
+    logs ? `\nOutput:\n${logs}` : "",
   ]
     .filter(Boolean)
     .join("\n");
@@ -251,7 +295,11 @@ function renderJobDetail(job) {
 
 async function loadJobDetail(jobId) {
   const { response, payload } = await adminFetch(`/api/pipeline/jobs/${jobId}`);
-  if (response.ok) renderJobDetail(payload);
+  if (!response.ok) return;
+  renderJobDetail(payload);
+  if (payload.status === "running" && pollingJobId !== jobId) {
+    pollJob(jobId);
+  }
 }
 
 async function loadJobs() {
@@ -261,45 +309,132 @@ async function loadJobs() {
 
 async function loadSyncState() {
   const el = document.getElementById("sync-state");
+  const remoteEl = document.getElementById("knowledge-remote");
+  const filesWrap = document.getElementById("knowledge-files");
+  const filesList = document.getElementById("knowledge-file-list");
+  const deleteBtn = document.getElementById("knowledge-delete-source");
+
   try {
-    const { response, payload } = await adminFetch("/api/pipeline/sync-state");
+    const { response, payload } = await adminFetch("/api/knowledge/overview");
     if (!response.ok) {
       el.className = "sync-state empty-hint";
-      el.textContent = apiErrorMessage(payload, "Could not load sync state.");
+      el.textContent = apiErrorMessage(payload, "Could not load knowledge overview.");
+      remoteEl.classList.add("hidden");
+      filesWrap.classList.add("hidden");
+      deleteBtn.disabled = true;
       return;
     }
-    if (!payload.sourceId) {
+
+    const state = payload.localState || {};
+    if (!state.sourceId) {
       el.className = "sync-state empty-hint";
-      el.textContent = "No sync state recorded.";
+      el.textContent = "No Genesys source linked yet. Run a sync step to create one.";
+      remoteEl.classList.add("hidden");
+      filesWrap.classList.add("hidden");
+      deleteBtn.disabled = true;
       return;
     }
+
+    const last = state.lastSync || {};
     el.className = "sync-state";
-    const last = payload.lastSync || {};
     el.innerHTML = `
     <dl class="meta-grid">
-      <dt>Source</dt><dd>${payload.sourceName || "—"} <code>${payload.sourceId}</code></dd>
-      <dt>Last sync</dt><dd>${formatTime(last.completedAt)}</dd>
+      <dt>Source</dt><dd>${state.sourceName || "—"} <code>${state.sourceId}</code></dd>
+      <dt>Environment</dt><dd>${state.environment || "—"}</dd>
+      <dt>Last sync</dt><dd>${formatTime(last.completedAt)} (${last.syncType || "—"})</dd>
       <dt>Files uploaded</dt><dd>${last.fileCount ?? "—"}</dd>
       <dt>Status</dt><dd>${last.finalStatus || "—"} / ${last.ingestionStatus || "—"}</dd>
     </dl>`;
+
+    deleteBtn.disabled = false;
+    deleteBtn.dataset.sourceId = state.sourceId;
+
+    if (payload.remoteError) {
+      remoteEl.className = "knowledge-remote admin-note";
+      remoteEl.textContent = `Could not refresh source from Genesys: ${payload.remoteError}`;
+      remoteEl.classList.remove("hidden");
+    } else if (payload.remoteSource) {
+      const remote = payload.remoteSource;
+      remoteEl.className = "knowledge-remote";
+      remoteEl.innerHTML = `
+      <dl class="meta-grid">
+        <dt>Remote name</dt><dd>${remote.name || "—"}</dd>
+        <dt>Remote type</dt><dd>${remote.type || "—"}</dd>
+        <dt>Remote status</dt><dd>${remote.status || remote.state || "—"}</dd>
+      </dl>`;
+      remoteEl.classList.remove("hidden");
+    } else {
+      remoteEl.classList.add("hidden");
+    }
+
+    const syncedFiles = last.files || [];
+    if (syncedFiles.length) {
+      filesList.innerHTML = syncedFiles.map((name) => `<li><code>${name}</code></li>`).join("");
+      filesWrap.classList.remove("hidden");
+    } else {
+      filesWrap.classList.add("hidden");
+    }
   } catch {
     el.className = "sync-state empty-hint";
-    el.textContent = "Could not load sync state.";
+    el.textContent = "Could not load knowledge overview.";
+    remoteEl.classList.add("hidden");
+    filesWrap.classList.add("hidden");
+    deleteBtn.disabled = true;
+  }
+}
+
+function renderSiteMeta() {
+  const el = document.getElementById("site-meta");
+  const site = sitesCache.find((entry) => entry.site === selectedSite);
+  if (!site) {
+    el.textContent = "Select a site to manage local crawled content.";
+    return;
+  }
+  const parts = [
+    `${site.rawFileCount ?? 0} raw pages`,
+    `${site.fileCount ?? 0} processed files`,
+  ];
+  if (site.processedAt) parts.push(`processed ${formatTime(site.processedAt)}`);
+  el.textContent = parts.join(" · ");
+}
+
+function setEditMode(enabled) {
+  editMode = enabled;
+  const editor = document.getElementById("preview-editor");
+  const body = document.getElementById("preview-body");
+  const saveBtn = document.getElementById("content-save");
+  const deleteBtn = document.getElementById("content-delete-file");
+  const toggleBtn = document.getElementById("content-edit-toggle");
+
+  editor.classList.toggle("hidden", !enabled);
+  body.classList.toggle("hidden", enabled);
+  saveBtn.classList.toggle("hidden", !enabled);
+  deleteBtn.classList.toggle("hidden", !enabled || !selectedFile);
+  toggleBtn.textContent = enabled ? "Cancel edit" : "Edit";
+
+  if (enabled) {
+    editor.value = currentFileContent;
   }
 }
 
 function renderSites(sites) {
+  sitesCache = sites;
   const select = document.getElementById("site-select");
   if (!sites.length) {
     select.innerHTML = '<option value="">No sites crawled yet</option>';
     document.getElementById("file-list").innerHTML = "";
+    selectedSite = null;
+    renderSiteMeta();
     return;
   }
   select.innerHTML = sites
     .map((s) => `<option value="${s.site}">${s.site}</option>`)
     .join("");
-  selectedSite = sites[0].site;
+  if (!selectedSite || !sites.some((s) => s.site === selectedSite)) {
+    selectedSite = sites[0].site;
+  }
   select.value = selectedSite;
+  renderSiteMeta();
   loadFilesForSite();
 }
 
@@ -315,6 +450,7 @@ async function loadSites() {
 async function loadFilesForSite() {
   const select = document.getElementById("site-select");
   selectedSite = select.value;
+  renderSiteMeta();
   if (!selectedSite) return;
 
   const processed = isProcessedLayer();
@@ -326,7 +462,18 @@ async function loadFilesForSite() {
     const files = payload.files || [];
     if (!files.length) {
       list.innerHTML = '<li class="empty-hint">No files in this layer.</li>';
+      selectedFile = null;
+      setEditMode(false);
+      document.getElementById("preview-title").textContent = "Select a file";
+      document.getElementById("preview-body").textContent = "";
+      document.getElementById("content-edit-toggle").disabled = true;
       return;
+    }
+    if (selectedFile && !files.includes(selectedFile)) {
+      selectedFile = null;
+      setEditMode(false);
+      document.getElementById("preview-title").textContent = "Select a file";
+      document.getElementById("preview-body").textContent = "";
     }
     list.innerHTML = files
       .map(
@@ -338,6 +485,7 @@ async function loadFilesForSite() {
     list.querySelectorAll(".file-item").forEach((btn) => {
       btn.addEventListener("click", () => previewFile(btn.dataset.file));
     });
+    document.getElementById("content-edit-toggle").disabled = !selectedFile;
   } catch {
     /* auth handler already cleared the saved key */
   }
@@ -345,9 +493,11 @@ async function loadFilesForSite() {
 
 async function previewFile(filename) {
   selectedFile = filename;
+  setEditMode(false);
   document.querySelectorAll(".file-item").forEach((el) => {
     el.classList.toggle("active", el.dataset.file === filename);
   });
+  document.getElementById("content-edit-toggle").disabled = false;
 
   const processed = isProcessedLayer();
   try {
@@ -355,30 +505,224 @@ async function previewFile(filename) {
       `/api/content/sites/${encodeURIComponent(selectedSite)}/files/${encodeURIComponent(filename)}?processed=${processed}`,
     );
     document.getElementById("preview-title").textContent = filename;
-    document.getElementById("preview-body").textContent = response.ok
+    currentFileContent = response.ok
       ? payload.content
       : apiErrorMessage(payload, `Could not load file (HTTP ${response.status}).`);
+    document.getElementById("preview-body").textContent = currentFileContent;
   } catch (error) {
+    currentFileContent = "";
     document.getElementById("preview-body").textContent = error.message;
+  }
+}
+
+async function saveCurrentFile() {
+  if (!selectedSite || !selectedFile) return;
+  const processed = isProcessedLayer();
+  const content = document.getElementById("preview-editor").value;
+  try {
+    const { response, payload } = await adminFetch(
+      `/api/content/sites/${encodeURIComponent(selectedSite)}/files/${encodeURIComponent(selectedFile)}?processed=${processed}`,
+      { method: "PUT", body: JSON.stringify({ content }) },
+    );
+    if (!response.ok) {
+      window.alert(apiErrorMessage(payload, "Could not save file."));
+      return;
+    }
+    currentFileContent = payload.content;
+    document.getElementById("preview-body").textContent = currentFileContent;
+    setEditMode(false);
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+
+async function deleteCurrentFile() {
+  if (!selectedSite || !selectedFile) return;
+  const processed = isProcessedLayer();
+  if (!window.confirm(`Delete ${selectedFile} from ${selectedSite}?`)) return;
+
+  try {
+    const { response, payload } = await adminFetch(
+      `/api/content/sites/${encodeURIComponent(selectedSite)}/files/${encodeURIComponent(selectedFile)}?processed=${processed}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      window.alert(apiErrorMessage(payload, "Could not delete file."));
+      return;
+    }
+    selectedFile = null;
+    setEditMode(false);
+    document.getElementById("preview-title").textContent = "Select a file";
+    document.getElementById("preview-body").textContent = "";
+    await loadSites();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+
+async function createContentFile() {
+  if (!selectedSite) {
+    window.alert("Select a site first.");
+    return;
+  }
+  const filename = window.prompt("New filename (e.g. page.md):");
+  if (!filename) return;
+  const processed = isProcessedLayer();
+  try {
+    const { response, payload } = await adminFetch(
+      `/api/content/sites/${encodeURIComponent(selectedSite)}/files`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          filename,
+          content: "---\ntitle: New page\nsource_url: \n---\n\n",
+          processed,
+        }),
+      },
+    );
+    if (!response.ok) {
+      window.alert(apiErrorMessage(payload, "Could not create file."));
+      return;
+    }
+    await loadSites();
+    await previewFile(filename);
+    setEditMode(true);
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+
+async function deleteCurrentSite() {
+  if (!selectedSite) return;
+  if (
+    !window.confirm(
+      `Delete all content for ${selectedSite}? This removes raw and processed files from the content store.`,
+    )
+  ) {
+    return;
+  }
+  try {
+    const { response, payload } = await adminFetch(
+      `/api/content/sites/${encodeURIComponent(selectedSite)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      window.alert(apiErrorMessage(payload, "Could not delete site."));
+      return;
+    }
+    selectedSite = null;
+    selectedFile = null;
+    await loadSites();
+  } catch (error) {
+    window.alert(error.message);
+  }
+}
+
+function selectedPipelineSteps() {
+  return [...document.querySelectorAll('input[name="pipeline-step"]:checked')].map(
+    (input) => input.value,
+  );
+}
+
+async function startPipelineJob(body) {
+  document.getElementById("job-log").textContent = "Starting pipeline...";
+  document.getElementById("job-detail").classList.remove("hidden");
+
+  const { response, payload } = await adminFetch("/api/pipeline/run", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    document.getElementById("job-log").textContent = apiErrorMessage(
+      payload,
+      "Could not start ingest.",
+    );
+    return;
+  }
+  pollJob(payload.jobId);
+}
+
+async function reprocessSelectedSite() {
+  if (!selectedSite) {
+    window.alert("Select a site first.");
+    return;
+  }
+  if (!ensureKey()) return;
+  await startPipelineJob({ site: selectedSite, steps: ["process"] });
+}
+
+async function pushSelectedSiteToGenesys() {
+  if (!selectedSite) {
+    window.alert("Select a site in the content store first.");
+    return;
+  }
+  if (!ensureKey()) return;
+  const syncType = document.getElementById("sync-type").value;
+  const sourceId = document.getElementById("source-id").value.trim();
+  const body = { site: selectedSite, steps: ["sync"], syncType };
+  if (sourceId) body.sourceId = sourceId;
+  await startPipelineJob(body);
+}
+
+async function deleteGenesysSource() {
+  const btn = document.getElementById("knowledge-delete-source");
+  const sourceId = btn.dataset.sourceId;
+  if (!sourceId) return;
+  if (
+    !window.confirm(
+      `Delete Genesys knowledge source ${sourceId}? This removes uploaded files from Knowledge Fabric.`,
+    )
+  ) {
+    return;
+  }
+  try {
+    const { response, payload } = await adminFetch(
+      `/api/knowledge/sources/${encodeURIComponent(sourceId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      window.alert(apiErrorMessage(payload, "Could not delete Genesys source."));
+      return;
+    }
+    await loadSyncState();
+  } catch (error) {
+    window.alert(error.message);
   }
 }
 
 async function pollJob(jobId) {
   if (pollTimer) clearInterval(pollTimer);
+  pollingJobId = jobId;
+
+  async function refreshJob() {
+    const { response, payload } = await adminFetch(`/api/pipeline/jobs/${jobId}`);
+    if (response.ok) {
+      renderJobDetail(payload);
+      await loadJobs();
+    }
+    if (payload?.status === "completed" || payload?.status === "failed") {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      pollingJobId = null;
+      await loadSites();
+      await loadSyncState();
+    }
+  }
+
+  try {
+    await refreshJob();
+  } catch {
+    pollingJobId = null;
+    return;
+  }
+
   pollTimer = setInterval(async () => {
     try {
-      const { response, payload } = await adminFetch(`/api/pipeline/jobs/${jobId}`);
-      if (response.ok) {
-        renderJobDetail(payload);
-        await loadJobs();
-      }
-      if (payload.status === "completed" || payload.status === "failed") {
-        clearInterval(pollTimer);
-        await loadSites();
-        await loadSyncState();
-      }
+      await refreshJob();
     } catch {
       clearInterval(pollTimer);
+      pollTimer = null;
+      pollingJobId = null;
     }
   }, 2500);
 }
@@ -419,43 +763,60 @@ export function initAdmin(config) {
     event.preventDefault();
     if (!ensureKey()) return;
 
+    const steps = selectedPipelineSteps();
+    if (!steps.length) {
+      window.alert("Select at least one pipeline step.");
+      return;
+    }
+
     const body = {
-      url: document.getElementById("url").value,
       syncType: document.getElementById("sync-type").value,
       crawlLimit: Number(document.getElementById("crawl-limit").value),
+      steps,
     };
     const sourceId = document.getElementById("source-id").value.trim();
     if (sourceId) body.sourceId = sourceId;
 
-    document.getElementById("job-log").textContent = "Starting pipeline...";
-    document.getElementById("job-detail").classList.remove("hidden");
+    if (steps.includes("crawl")) {
+      body.url = document.getElementById("url").value;
+    } else {
+      const url = document.getElementById("url").value;
+      body.site = selectedSite || new URL(url).hostname.replace(":", "-");
+    }
 
     try {
-      const { response, payload } = await adminFetch("/api/pipeline/run", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      if (!response.ok) {
-        document.getElementById("job-log").textContent = apiErrorMessage(
-          payload,
-          "Could not start ingest.",
-        );
-        return;
-      }
-      pollJob(payload.jobId);
+      await startPipelineJob(body);
     } catch (error) {
       document.getElementById("job-log").textContent = error.message;
     }
   });
 
   document.getElementById("refresh-admin").addEventListener("click", refreshAll);
-  document.getElementById("site-select").addEventListener("change", loadFilesForSite);
+  document.getElementById("refresh-knowledge").addEventListener("click", loadSyncState);
+  document.getElementById("content-new-file").addEventListener("click", createContentFile);
+  document.getElementById("content-reprocess").addEventListener("click", reprocessSelectedSite);
+  document.getElementById("content-delete-site").addEventListener("click", deleteCurrentSite);
+  document.getElementById("content-edit-toggle").addEventListener("click", () => {
+    if (!selectedFile) return;
+    setEditMode(!editMode);
+  });
+  document.getElementById("content-save").addEventListener("click", saveCurrentFile);
+  document.getElementById("content-delete-file").addEventListener("click", deleteCurrentFile);
+  document.getElementById("knowledge-resync-site").addEventListener("click", pushSelectedSiteToGenesys);
+  document.getElementById("knowledge-delete-source").addEventListener("click", deleteGenesysSource);
+  document.getElementById("site-select").addEventListener("change", () => {
+    selectedFile = null;
+    setEditMode(false);
+    loadFilesForSite();
+  });
   document.querySelectorAll('input[name="layer"]').forEach((input) => {
     input.addEventListener("change", () => {
       selectedFile = null;
+      setEditMode(false);
       loadFilesForSite();
       document.getElementById("preview-title").textContent = "Select a file";
       document.getElementById("preview-body").textContent = "";
+      document.getElementById("content-edit-toggle").disabled = true;
     });
   });
 }
