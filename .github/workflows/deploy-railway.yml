@@ -1,0 +1,36 @@
+# Deploy to Railway on every push to main.
+#
+# Setup (one time):
+#   1. Railway → ava-faq-chat → Settings → Tokens → New Token (production environment)
+#   2. GitHub → AVA_faq_bot → Settings → Secrets → Actions → New secret: RAILWAY_TOKEN
+#
+# Do not also enable Railway's native GitHub autodeploy on the same service — pick one path.
+
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: railway-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    container: ghcr.io/railwayapp/cli:latest
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+      RAILWAY_PROJECT_ID: d99d96ef-58b6-441d-83b2-958019040203
+      RAILWAY_ENVIRONMENT_ID: afd021e9-96e1-4751-865b-6bd9028036b7
+      RAILWAY_SERVICE_ID: 790998ce-933e-4a4f-b443-6718fa20f031
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Railway
+        run: |
+          railway up --ci \
+            --project="${RAILWAY_PROJECT_ID}" \
+            --environment="${RAILWAY_ENVIRONMENT_ID}" \
+            --service="${RAILWAY_SERVICE_ID}"
