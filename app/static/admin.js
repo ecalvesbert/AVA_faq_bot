@@ -36,6 +36,17 @@ function showAdminUnlocked(unlocked) {
   document.getElementById("admin-content").classList.toggle("hidden", !unlocked);
 }
 
+function setAuthError(message) {
+  const el = document.getElementById("admin-auth-error");
+  if (!message) {
+    el.textContent = "";
+    el.classList.add("hidden");
+    return;
+  }
+  el.textContent = message;
+  el.classList.remove("hidden");
+}
+
 function ensureKey() {
   if (!pipelineKeyRequired) {
     showAdminUnlocked(true);
@@ -49,11 +60,10 @@ function ensureKey() {
   return false;
 }
 
-function saveKey(key) {
+function persistKey(key) {
   pipelineKey = key.trim();
   if (pipelineKey) {
     localStorage.setItem(STORAGE_KEY, pipelineKey);
-    showAdminUnlocked(true);
   }
   return Boolean(pipelineKey);
 }
@@ -63,11 +73,99 @@ function clearKey(message) {
   localStorage.removeItem(STORAGE_KEY);
   showAdminUnlocked(false);
   const note = document.querySelector("#admin-auth .admin-note");
-  if (note) {
-    note.textContent = message
-      || "Enter your pipeline API key to manage ingest and content. Find it in Railway → ava-faq-chat → Variables → PIPELINE_API_KEY.";
+  if (note && !message) {
+    note.textContent =
+      "Enter your pipeline API key to manage ingest and content. Find it in Railway → ava-faq-chat → Variables → PIPELINE_API_KEY.";
   }
-  document.getElementById("admin-key-input").value = "";
+  setAuthError(message || "");
+}
+
+async function fetchWithKey(url, key, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Pipeline-Key": key.trim(),
+      ...(options.headers || {}),
+    },
+  });
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  return { response, payload };
+}
+
+async function validatePipelineKey(key) {
+  const trimmed = key.trim();
+  if (!trimmed) {
+    return { ok: false, message: "Enter a pipeline API key." };
+  }
+
+  const { response, payload } = await fetchWithKey("/api/pipeline/jobs", trimmed);
+  if (response.status === 401) {
+    return {
+      ok: false,
+      message:
+        "Invalid pipeline API key. Copy the current value from Railway → ava-faq-chat → Variables → PIPELINE_API_KEY.",
+    };
+  }
+  if (response.status === 503) {
+    return {
+      ok: false,
+      message:
+        apiErrorMessage(
+          payload,
+          "PIPELINE_API_KEY is not configured on the server. Set it in Railway Variables and redeploy.",
+        ),
+    };
+  }
+  if (!response.ok) {
+    return {
+      ok: false,
+      message: apiErrorMessage(payload, `Could not verify key (HTTP ${response.status}).`),
+    };
+  }
+  return { ok: true };
+}
+
+async function unlockWithKey(key) {
+  const submit = document.getElementById("admin-key-submit");
+  submit.disabled = true;
+  setAuthError("");
+
+  const result = await validatePipelineKey(key);
+  submit.disabled = false;
+
+  if (!result.ok) {
+    setAuthError(result.message);
+    showAdminUnlocked(false);
+    return false;
+  }
+
+  persistKey(key);
+  setAuthError("");
+  showAdminUnlocked(true);
+  return true;
+}
+
+async function tryRestoreStoredKey() {
+  if (!pipelineKeyRequired || !pipelineKey) {
+    showAdminUnlocked(!pipelineKeyRequired);
+    return Boolean(!pipelineKeyRequired);
+  }
+
+  showAdminUnlocked(false);
+  const result = await validatePipelineKey(pipelineKey);
+  if (!result.ok) {
+    clearKey(result.message);
+    return false;
+  }
+
+  showAdminUnlocked(true);
+  return true;
 }
 
 function apiErrorMessage(payload, fallback = "Request failed.") {
@@ -295,28 +393,25 @@ export function initAdmin(config) {
   const keyForm = document.getElementById("admin-key-form");
   const pipelineForm = document.getElementById("pipeline-form");
 
-  if (pipelineKeyRequired && !pipelineKey) {
-    showAdminUnlocked(false);
-  } else {
+  showAdminUnlocked(false);
+  if (!pipelineKeyRequired) {
     showAdminUnlocked(true);
+  } else if (pipelineKey) {
+    tryRestoreStoredKey().then((ok) => {
+      if (ok) refreshAll();
+    });
   }
 
   keyForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const input = document.getElementById("admin-key-input");
-    if (!saveKey(input.value)) return;
-    try {
-      await loadJobs();
-    } catch (error) {
-      document.getElementById("job-log").textContent = error.message;
-      document.getElementById("job-detail").classList.remove("hidden");
-      return;
-    }
-    refreshAll();
+    const unlocked = await unlockWithKey(input.value);
+    if (unlocked) refreshAll();
   });
 
   document.getElementById("clear-admin-key").addEventListener("click", () => {
-    clearKey();
+    clearKey("");
+    document.getElementById("admin-key-input").value = "";
     document.getElementById("admin-key-input").focus();
   });
 
@@ -366,5 +461,15 @@ export function initAdmin(config) {
 }
 
 export function onAdminTabShown() {
-  if (ensureKey()) refreshAll();
+  if (!pipelineKeyRequired) {
+    refreshAll();
+    return;
+  }
+  if (pipelineKey) {
+    tryRestoreStoredKey().then((ok) => {
+      if (ok) refreshAll();
+    });
+    return;
+  }
+  showAdminUnlocked(false);
 }

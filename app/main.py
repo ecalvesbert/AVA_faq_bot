@@ -75,12 +75,13 @@ def require_chat_key(x_chat_key: Optional[str] = Header(default=None)) -> None:
 
 def require_pipeline_key(x_pipeline_key: Optional[str] = Header(default=None)) -> None:
     expected = config.pipeline_api_key()
+    provided = (x_pipeline_key or "").strip()
     if config.pipeline_key_enforced() and not expected:
         raise HTTPException(
             status_code=503,
             detail="PIPELINE_API_KEY is not configured. Ingest is manual-only via /admin.",
         )
-    if expected and x_pipeline_key != expected:
+    if expected and provided != expected:
         raise HTTPException(status_code=401, detail="Invalid pipeline API key")
 
 

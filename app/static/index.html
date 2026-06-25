@@ -44,8 +44,9 @@
         <p class="admin-note">Enter your pipeline API key to manage ingest and content. Find it in Railway → ava-faq-chat → Variables → <code>PIPELINE_API_KEY</code>.</p>
         <form id="admin-key-form" class="admin-key-row">
           <input id="admin-key-input" type="password" placeholder="Pipeline API key" autocomplete="off">
-          <button class="primary-button" type="submit">Unlock</button>
+          <button id="admin-key-submit" class="primary-button" type="submit">Unlock</button>
         </form>
+        <p id="admin-auth-error" class="admin-auth-error hidden" role="alert"></p>
       </div>
 
       <div id="admin-content" class="admin-layout hidden">

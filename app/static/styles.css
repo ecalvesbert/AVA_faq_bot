@@ -325,6 +325,17 @@ button[type="submit"]:disabled,
   font: inherit;
 }
 
+.admin-auth-error {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(180, 35, 24, 0.08);
+  border: 1px solid rgba(180, 35, 24, 0.25);
+  color: #b42318;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
 .admin-columns {
   display: grid;
   grid-template-columns: 1fr 1fr;
