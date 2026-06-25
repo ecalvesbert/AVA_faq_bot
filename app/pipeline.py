@@ -19,13 +19,37 @@ PipelineStep = Literal["crawl", "process", "sync"]
 from app.config import (
     crawl_dir_for_url,
     data_dir,
+    is_production,
     jobs_dir,
     knowledge_sync_state_path,
     processed_dir_for_url,
 )
+from app.security import redact_log_text, validate_crawl_url, validate_job_id, validate_site_name
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _lock = threading.Lock()
+_pipeline_semaphore = threading.Semaphore(1)
+
+_SUBPROCESS_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PYTHONPATH",
+    "DATA_DIR",
+    "GENESYS_CLIENT_ID",
+    "GENESYS_CLIENT_SECRET",
+    "GENESYS_ENVIRONMENT",
+    "GENESYS_PROFILE",
+    "FIRECRAWL_API_KEY",
+    "PYTHONUNBUFFERED",
+)
+
+_STEP_TIMEOUT_SECONDS = {
+    "crawl": 3600,
+    "process": 900,
+    "sync": 3600,
+}
 
 
 def _utc_now() -> str:
@@ -33,11 +57,19 @@ def _utc_now() -> str:
 
 
 def _job_path(job_id: str) -> Path:
-    return jobs_dir() / f"{job_id}.json"
+    safe_id = validate_job_id(job_id)
+    root = jobs_dir().resolve()
+    path = (root / f"{safe_id}.json").resolve()
+    if not str(path).startswith(str(root)):
+        raise ValueError("Invalid job id")
+    return path
 
 
 def load_job(job_id: str) -> dict[str, Any] | None:
-    path = _job_path(job_id)
+    try:
+        path = _job_path(job_id)
+    except ValueError:
+        return None
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
@@ -59,9 +91,40 @@ def list_jobs(limit: int = 20) -> list[dict[str, Any]]:
     return jobs
 
 
+def reconcile_interrupted_jobs() -> int:
+    updated = 0
+    for path in jobs_dir().glob("*.json"):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if job.get("status") not in {"running", "pending"}:
+            continue
+        job["status"] = "interrupted"
+        job["error"] = "Service restarted while job was in progress"
+        job["finishedAt"] = _utc_now()
+        save_job(job)
+        updated += 1
+    return updated
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = {key: os.environ[key] for key in _SUBPROCESS_ENV_KEYS if key in os.environ}
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
 def _append_step_output(step: dict[str, Any], key: str, chunk: str) -> None:
     current = step.get(key) or ""
-    step[key] = (current + chunk)[-4000:]
+    step[key] = redact_log_text((current + chunk)[-4000:])
+
+
+def _terminate_process(proc: subprocess.Popen[str]) -> None:
+    proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _run_step(job: dict[str, Any], name: str, command: list[str]) -> None:
@@ -75,15 +138,13 @@ def _run_step(job: dict[str, Any], name: str, command: list[str]) -> None:
     job["steps"].append(step)
     save_job(job)
 
-    env = os.environ.copy()
-    env["PYTHONUNBUFFERED"] = "1"
     proc = subprocess.Popen(
         command,
         cwd=_REPO_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=env,
+        env=_subprocess_env(),
     )
 
     def read_stream(stream: Any, key: str) -> None:
@@ -99,10 +160,26 @@ def _run_step(job: dict[str, Any], name: str, command: list[str]) -> None:
     ]
     for thread in threads:
         thread.start()
+
+    timeout = _STEP_TIMEOUT_SECONDS.get(name, 1800)
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process(proc)
+        for thread in threads:
+            thread.join(timeout=1)
+        step["finishedAt"] = _utc_now()
+        step["exitCode"] = -1
+        step["status"] = "failed"
+        step["stderr"] = redact_log_text(
+            (step.get("stderr") or "") + f"\nStep timed out after {timeout} seconds."
+        )
+        save_job(job)
+        raise RuntimeError(f"{name} timed out after {timeout} seconds") from exc
+
     for thread in threads:
         thread.join()
 
-    returncode = proc.wait()
     step["finishedAt"] = _utc_now()
     step["exitCode"] = returncode
 
@@ -120,9 +197,7 @@ def _site_key(url: str) -> str:
 
 
 def _site_dir(site: str) -> Path:
-    if not site or "/" in site or "\\" in site or ".." in site:
-        raise ValueError("Invalid site name")
-    return data_dir() / "crawls" / site
+    return data_dir() / "crawls" / validate_site_name(site)
 
 
 def _safe_filename(filename: str) -> str:
@@ -138,10 +213,10 @@ def _resolve_pipeline_paths(
     site: str | None,
 ) -> tuple[str, Path, Path]:
     if site:
-        site_key = site.strip()
+        site_key = validate_site_name(site)
         crawl_dir = _site_dir(site_key)
     elif url:
-        site_key = _site_key(url)
+        site_key = _site_key(validate_crawl_url(url))
         crawl_dir = crawl_dir_for_url(url)
     else:
         raise ValueError("Provide url or site")
@@ -163,8 +238,15 @@ def run_pipeline(
     selected_steps = steps or ["crawl", "process", "sync"]
     if not selected_steps:
         raise ValueError("At least one pipeline step is required")
-    if "crawl" in selected_steps and not url:
-        raise ValueError("url is required for the crawl step")
+    if "crawl" in selected_steps:
+        if not url:
+            raise ValueError("url is required for the crawl step")
+        validate_crawl_url(url, resolve_host=is_production())
+    if site:
+        validate_site_name(site)
+
+    if not _pipeline_semaphore.acquire(blocking=False):
+        raise ValueError("Another pipeline job is already running. Wait for it to finish.")
 
     site_key, crawl_dir, processed_dir = _resolve_pipeline_paths(url=url, site=site)
     job_id = str(uuid.uuid4())
@@ -185,12 +267,12 @@ def run_pipeline(
     save_job(job)
 
     def worker() -> None:
-        with _lock:
-            job["status"] = "running"
-            job["startedAt"] = _utc_now()
-            save_job(job)
-
         try:
+            with _lock:
+                job["status"] = "running"
+                job["startedAt"] = _utc_now()
+                save_job(job)
+
             data_dir().mkdir(parents=True, exist_ok=True)
             crawl_dir.mkdir(parents=True, exist_ok=True)
 
@@ -265,6 +347,8 @@ def run_pipeline(
             job["error"] = str(exc)
             job["finishedAt"] = _utc_now()
             save_job(job)
+        finally:
+            _pipeline_semaphore.release()
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
@@ -300,6 +384,17 @@ def list_sites() -> list[dict[str, Any]]:
         entry["rawFileCount"] = len(raw_md)
         sites.append(entry)
     return sites
+
+
+def get_site_manifest(site: str) -> dict[str, Any]:
+    base = _site_dir(site).resolve()
+    for relative in ("processed/manifest.json", "manifest.json"):
+        path = (base / relative).resolve()
+        if not str(path).startswith(str(base)):
+            raise ValueError("Invalid site path")
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    raise FileNotFoundError("Manifest not found")
 
 
 def _content_file_path(site: str, filename: str, *, processed: bool) -> Path:
@@ -354,9 +449,9 @@ def load_sync_state() -> dict[str, Any]:
 
 
 def list_content_files(site: str, *, processed: bool = True) -> list[str]:
-    base = data_dir() / "crawls" / site
-    folder = base / "processed" if processed else base
-    if not folder.exists():
+    base = _site_dir(site).resolve()
+    folder = (base / "processed" if processed else base).resolve()
+    if not str(folder).startswith(str(base)) or not folder.exists():
         return []
     return sorted(path.name for path in folder.glob("*.md"))
 

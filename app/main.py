@@ -4,19 +4,49 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import config, genesys_ava, knowledge, pipeline
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-app = FastAPI(title="AVA FAQ Chat", version="1.0.0")
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if config.is_production():
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    pipeline.reconcile_interrupted_jobs()
+    genesys_ava.start_session_cleanup()
+    yield
+
+
+app = FastAPI(
+    title="AVA FAQ Chat",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url=None if config.is_production() else "/docs",
+    redoc_url=None if config.is_production() else "/redoc",
+    openapi_url=None if config.is_production() else "/openapi.json",
+)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 class SessionResponse(BaseModel):
@@ -91,7 +121,16 @@ class ContentFileCreateRequest(BaseModel):
     processed: bool = True
 
 
+def upstream_error_message(exc: Exception, fallback: str = "Upstream request failed") -> str:
+    return fallback
+
+
 def require_chat_key(x_chat_key: Optional[str] = Header(default=None)) -> None:
+    if config.chat_key_enforced() and not config.chat_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="CHAT_API_KEY is not configured on the server.",
+        )
     expected = config.chat_api_key()
     if expected and x_chat_key != expected:
         raise HTTPException(status_code=401, detail="Invalid chat API key")
@@ -114,6 +153,45 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/health/ready")
+def health_ready() -> dict[str, Any]:
+    checks: dict[str, str] = {}
+    ok = True
+
+    if config.chat_key_enforced() and not config.chat_api_key():
+        checks["chatKey"] = "missing"
+        ok = False
+    else:
+        checks["chatKey"] = "ok" if config.chat_api_key() else "optional"
+
+    if not config.genesys_agent_id():
+        checks["avaAgentId"] = "missing"
+        ok = False
+    else:
+        checks["avaAgentId"] = "ok"
+
+    if config.pipeline_key_enforced() and not config.pipeline_api_key():
+        checks["pipelineKey"] = "missing"
+        ok = False
+    else:
+        checks["pipelineKey"] = "ok" if config.pipeline_api_key() else "optional"
+
+    try:
+        config.data_dir().mkdir(parents=True, exist_ok=True)
+        probe = config.data_dir() / ".writable"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        checks["dataDir"] = "ok"
+    except OSError:
+        checks["dataDir"] = "not_writable"
+        ok = False
+
+    payload = {"status": "ready" if ok else "degraded", "checks": checks}
+    if not ok:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
+
+
 @app.get("/api/config/public")
 def public_config() -> dict[str, str]:
     return {
@@ -129,7 +207,10 @@ def create_chat_session(_: None = Depends(require_chat_key)) -> SessionResponse:
     try:
         session, greeting = genesys_ava.create_session()
     except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=upstream_error_message(exc, "Could not start chat session"),
+        ) from exc
 
     return SessionResponse(
         sessionId=session.id,
@@ -150,7 +231,10 @@ def send_chat_message(body: MessageRequest, _: None = Depends(require_chat_key))
         turn = genesys_ava.send_message(session, body.message.strip())
         response_time_ms = int((time.perf_counter() - started) * 1000)
     except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=upstream_error_message(exc, "Could not send message"),
+        ) from exc
 
     text = genesys_ava.extract_agent_text(turn)
     reply = text or "I don't have a response for that yet."
@@ -208,17 +292,21 @@ def get_content_sites(_: None = Depends(require_pipeline_key)) -> list[dict[str,
 
 @app.get("/api/content/sites/{site}/files")
 def get_site_files(site: str, processed: bool = True, _: None = Depends(require_pipeline_key)) -> dict[str, Any]:
-    return {"site": site, "processed": processed, "files": pipeline.list_content_files(site, processed=processed)}
+    try:
+        files = pipeline.list_content_files(site, processed=processed)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"site": site, "processed": processed, "files": files}
 
 
 @app.get("/api/content/sites/{site}/manifest")
 def get_site_manifest(site: str, _: None = Depends(require_pipeline_key)) -> dict[str, Any]:
-    path = config.data_dir() / "crawls" / site / "processed" / "manifest.json"
-    if not path.exists():
-        path = config.data_dir() / "crawls" / site / "manifest.json"
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Manifest not found")
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return pipeline.get_site_manifest(site)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/content/import")
@@ -242,7 +330,10 @@ def get_knowledge_overview(_: None = Depends(require_pipeline_key)) -> dict[str,
     try:
         return knowledge.knowledge_overview()
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=upstream_error_message(exc, "Could not load knowledge overview"),
+        ) from exc
 
 
 @app.get("/api/knowledge/sources/{source_id}")
@@ -252,7 +343,10 @@ def get_knowledge_source(source_id: str, _: None = Depends(require_pipeline_key)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (RuntimeError, ValueError, FileNotFoundError) as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=upstream_error_message(exc, "Could not load knowledge source"),
+        ) from exc
 
 
 @app.delete("/api/knowledge/sources/{source_id}")
@@ -260,7 +354,10 @@ def delete_knowledge_source(source_id: str, _: None = Depends(require_pipeline_k
     try:
         return knowledge.delete_source(source_id)
     except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=upstream_error_message(exc, "Could not delete knowledge source"),
+        ) from exc
 
 
 @app.get("/api/content/sites/{site}/files/{filename}", response_model=ContentFileResponse)
@@ -359,7 +456,12 @@ def admin_redirect() -> HTMLResponse:
 
 @app.get("/", response_class=HTMLResponse)
 def chat_page() -> HTMLResponse:
-    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    chat_key = config.chat_api_key()
+    if chat_key:
+        inject = f"<script>window.__CHAT_API_KEY__={json.dumps(chat_key)};</script>"
+        html = html.replace("</head>", f"{inject}\n</head>", 1)
+    return HTMLResponse(html)
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

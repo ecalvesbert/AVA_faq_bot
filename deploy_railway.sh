@@ -81,6 +81,7 @@ fi
 GENESYS_ENVIRONMENT="${GENESYS_ENVIRONMENT:-mypurecloud.com}"
 AVA_VERSION="${AVA_VERSION:-6.0}"
 PIPELINE_API_KEY="${PIPELINE_API_KEY:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')}"
+CHAT_API_KEY="${CHAT_API_KEY:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')}"
 PROJECT_NAME="${RAILWAY_PROJECT_NAME:-ava-faq-chat}"
 SERVICE_NAME="${RAILWAY_SERVICE_NAME:-${PROJECT_NAME}}"
 WORKSPACE="${RAILWAY_WORKSPACE:-}"
@@ -89,7 +90,8 @@ echo "==> Railway project: ${PROJECT_NAME}"
 echo "==> Workspace: ${WORKSPACE}"
 echo "==> Genesys environment: ${GENESYS_ENVIRONMENT}"
 echo "==> AVA: ${AVA_AGENT_ID} v${AVA_VERSION}"
-echo "==> Pipeline API key (save this for /admin): ${PIPELINE_API_KEY}"
+echo "==> Pipeline API key (save for /admin): ${PIPELINE_API_KEY}" >&2
+echo "==> Chat API key (embedded in web UI): ${CHAT_API_KEY}" >&2
 
 if ! railway status >/dev/null 2>&1; then
   if [[ -z "${WORKSPACE}" ]]; then
@@ -120,6 +122,8 @@ railway variables set \
   "DATA_DIR=/data" \
   "PIPELINE_API_KEY=${PIPELINE_API_KEY}" \
   "REQUIRE_PIPELINE_KEY=1" \
+  "CHAT_API_KEY=${CHAT_API_KEY}" \
+  "REQUIRE_CHAT_KEY=1" \
   "CHAT_TITLE=FAQ Assistant" \
   "CHAT_SUBTITLE=Ask questions about our products and services."
 

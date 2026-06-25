@@ -150,7 +150,9 @@ async function loadConfig() {
   titleEl.textContent = appConfig.title;
   subtitleEl.textContent = appConfig.subtitle;
   document.title = appConfig.title;
-  if (appConfig.chatKeyRequired === "true") {
+  if (window.__CHAT_API_KEY__) {
+    chatKey = window.__CHAT_API_KEY__;
+  } else if (appConfig.chatKeyRequired === "true") {
     chatKey = window.prompt("Enter chat API key") || "";
   }
   initAdmin(appConfig);

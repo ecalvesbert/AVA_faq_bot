@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from call_ai_studio_api import get_access_token, request_json, resolve_config
 
 from app.config import genesys_agent_id, genesys_agent_version, studio_mode
+
+SESSION_TTL_SECONDS = 3600
+MAX_SESSIONS = 500
 
 
 @dataclass
@@ -20,11 +25,13 @@ class ChatSession:
     version: str
     environment: str
     studio_mode: bool
+    last_active: float = field(default_factory=time.time)
     noop_done: bool = False
     last_turn_id: str = ""
 
 
 _sessions: dict[str, ChatSession] = {}
+_sessions_lock = threading.Lock()
 
 
 def _api_url(environment: str, path: str) -> str:
@@ -58,9 +65,45 @@ def _token_and_env() -> tuple[str, str]:
     return token, environment
 
 
+def _touch_session(session: ChatSession) -> None:
+    session.last_active = time.time()
+
+
+def cleanup_sessions() -> int:
+    now = time.time()
+    removed = 0
+    with _sessions_lock:
+        expired = [
+            session_id
+            for session_id, session in _sessions.items()
+            if now - session.last_active > SESSION_TTL_SECONDS
+        ]
+        for session_id in expired:
+            _sessions.pop(session_id, None)
+            removed += 1
+
+        while len(_sessions) > MAX_SESSIONS:
+            oldest_id = min(_sessions.items(), key=lambda item: item[1].last_active)[0]
+            _sessions.pop(oldest_id, None)
+            removed += 1
+    return removed
+
+
+def start_session_cleanup(interval_seconds: int = 300) -> None:
+    def worker() -> None:
+        while True:
+            time.sleep(interval_seconds)
+            cleanup_sessions()
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def create_session() -> tuple[ChatSession, str]:
     token, environment = _token_and_env()
     agent_id = genesys_agent_id()
+    if not agent_id:
+        raise RuntimeError("AVA_AGENT_ID is not configured")
+
     version = genesys_agent_version()
     use_studio = studio_mode()
 
@@ -99,7 +142,7 @@ def create_session() -> tuple[ChatSession, str]:
         body=body,
     )
     if status not in {200, 201}:
-        raise RuntimeError(f"Create session failed (HTTP {status}): {payload}")
+        raise RuntimeError("Create session failed")
 
     session = ChatSession(
         id=str(uuid.uuid4()),
@@ -109,7 +152,8 @@ def create_session() -> tuple[ChatSession, str]:
         environment=environment,
         studio_mode=use_studio,
     )
-    _sessions[session.id] = session
+    with _sessions_lock:
+        _sessions[session.id] = session
 
     greeting = ""
     if use_studio:
@@ -120,11 +164,16 @@ def create_session() -> tuple[ChatSession, str]:
 
 
 def get_session(session_id: str) -> ChatSession | None:
-    return _sessions.get(session_id)
+    with _sessions_lock:
+        session = _sessions.get(session_id)
+        if session:
+            _touch_session(session)
+        return session
 
 
 def end_session(session_id: str) -> bool:
-    return _sessions.pop(session_id, None) is not None
+    with _sessions_lock:
+        return _sessions.pop(session_id, None) is not None
 
 
 def _post_turn(session: ChatSession, body: dict[str, Any]) -> dict[str, Any]:
@@ -143,9 +192,10 @@ def _post_turn(session: ChatSession, body: dict[str, Any]) -> dict[str, Any]:
         body=body,
     )
     if status not in {200, 201}:
-        raise RuntimeError(f"Turn failed (HTTP {status}): {payload}")
+        raise RuntimeError("Turn failed")
     if not isinstance(payload, dict):
         raise RuntimeError("Turn response was not JSON object")
+    _touch_session(session)
     return payload
 
 
@@ -183,7 +233,6 @@ def send_message(session: ChatSession, message: str) -> dict[str, Any]:
     turn = _post_turn(session, payload)
     session.last_turn_id = turn.get("id", session.last_turn_id)
 
-    # After knowledge/tool calls the AVA often returns nextAction NoOp with no text yet.
     for _ in range(3):
         if extract_agent_text(turn):
             break

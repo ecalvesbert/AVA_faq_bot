@@ -72,9 +72,17 @@ function runningStepHint(steps) {
   return `\n${running.name} is running. Live output appears below when available.\n`;
 }
 
+function escapeHtml(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function statusBadge(status) {
   const safe = String(status || "unknown").toLowerCase();
-  return `<span class="badge badge-${safe}">${safe}</span>`;
+  return `<span class="badge badge-${escapeHtml(safe)}">${escapeHtml(safe)}</span>`;
 }
 
 function showAdminUnlocked(unlocked) {
@@ -254,13 +262,13 @@ function renderJobs(jobs) {
   el.innerHTML = jobs
     .map(
       (job) => `
-    <button type="button" class="job-row" data-job-id="${job.id}">
+    <button type="button" class="job-row" data-job-id="${escapeHtml(job.id)}">
       <span class="job-row-main">
         ${statusBadge(job.status)}
-        <strong>${job.site || job.url || job.id.slice(0, 8)}</strong>
-        <span class="muted">${job.syncType || ""}</span>
+        <strong>${escapeHtml(job.site || job.url || job.id.slice(0, 8))}</strong>
+        <span class="muted">${escapeHtml(job.syncType || "")}</span>
       </span>
-      <span class="muted">${formatTime(job.createdAt)}</span>
+      <span class="muted">${escapeHtml(formatTime(job.createdAt))}</span>
     </button>`,
     )
     .join("");
@@ -339,11 +347,11 @@ async function loadSyncState() {
     el.className = "sync-state";
     el.innerHTML = `
     <dl class="meta-grid">
-      <dt>Source</dt><dd>${state.sourceName || "—"} <code>${state.sourceId}</code></dd>
-      <dt>Environment</dt><dd>${state.environment || "—"}</dd>
-      <dt>Last sync</dt><dd>${formatTime(last.completedAt)} (${last.syncType || "—"})</dd>
-      <dt>Files uploaded</dt><dd>${last.fileCount ?? "—"}</dd>
-      <dt>Status</dt><dd>${last.finalStatus || "—"} / ${last.ingestionStatus || "—"}</dd>
+      <dt>Source</dt><dd>${escapeHtml(state.sourceName || "—")} <code>${escapeHtml(state.sourceId)}</code></dd>
+      <dt>Environment</dt><dd>${escapeHtml(state.environment || "—")}</dd>
+      <dt>Last sync</dt><dd>${escapeHtml(formatTime(last.completedAt))} (${escapeHtml(last.syncType || "—")})</dd>
+      <dt>Files uploaded</dt><dd>${escapeHtml(last.fileCount ?? "—")}</dd>
+      <dt>Status</dt><dd>${escapeHtml(last.finalStatus || "—")} / ${escapeHtml(last.ingestionStatus || "—")}</dd>
     </dl>`;
 
     deleteBtn.disabled = false;
@@ -358,9 +366,9 @@ async function loadSyncState() {
       remoteEl.className = "knowledge-remote";
       remoteEl.innerHTML = `
       <dl class="meta-grid">
-        <dt>Remote name</dt><dd>${remote.name || "—"}</dd>
-        <dt>Remote type</dt><dd>${remote.type || "—"}</dd>
-        <dt>Remote status</dt><dd>${remote.status || remote.state || "—"}</dd>
+        <dt>Remote name</dt><dd>${escapeHtml(remote.name || "—")}</dd>
+        <dt>Remote type</dt><dd>${escapeHtml(remote.type || "—")}</dd>
+        <dt>Remote status</dt><dd>${escapeHtml(remote.status || remote.state || "—")}</dd>
       </dl>`;
       remoteEl.classList.remove("hidden");
     } else {
@@ -369,7 +377,9 @@ async function loadSyncState() {
 
     const syncedFiles = last.files || [];
     if (syncedFiles.length) {
-      filesList.innerHTML = syncedFiles.map((name) => `<li><code>${name}</code></li>`).join("");
+      filesList.innerHTML = syncedFiles
+        .map((name) => `<li><code>${escapeHtml(name)}</code></li>`)
+        .join("");
       filesWrap.classList.remove("hidden");
     } else {
       filesWrap.classList.add("hidden");
@@ -428,7 +438,7 @@ function renderSites(sites) {
     return;
   }
   select.innerHTML = sites
-    .map((s) => `<option value="${s.site}">${s.site}</option>`)
+    .map((s) => `<option value="${escapeHtml(s.site)}">${escapeHtml(s.site)}</option>`)
     .join("");
   if (!selectedSite || !sites.some((s) => s.site === selectedSite)) {
     selectedSite = sites[0].site;
@@ -478,7 +488,7 @@ async function loadFilesForSite() {
     list.innerHTML = files
       .map(
         (name) =>
-          `<li><button type="button" class="file-item${name === selectedFile ? " active" : ""}" data-file="${name}">${name}</button></li>`,
+          `<li><button type="button" class="file-item${name === selectedFile ? " active" : ""}" data-file="${escapeHtml(name)}">${escapeHtml(name)}</button></li>`,
       )
       .join("");
 

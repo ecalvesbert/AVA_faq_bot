@@ -7,6 +7,10 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
+from typing import Any
+
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +20,8 @@ from typing import Any
 
 DEFAULT_ENDPOINT = "/api/v2/apps/agentic/copilots/agents"
 DEFAULT_ENVIRONMENT = "mypurecloud.com"
+_TOKEN_CACHE: dict[str, Any] = {"key": "", "token": "", "expires_at": 0.0}
+_TOKEN_LOCK = threading.Lock()
 
 
 def load_gc_profile(profile: str) -> dict[str, str]:
@@ -93,6 +99,29 @@ def request_json(
 
 
 def get_access_token(client_id: str, client_secret: str, environment: str) -> str:
+    cache_key = f"{client_id}:{environment}"
+    now = time.time()
+    with _TOKEN_LOCK:
+        if (
+            _TOKEN_CACHE.get("key") == cache_key
+            and _TOKEN_CACHE.get("token")
+            and _TOKEN_CACHE.get("expires_at", 0) > now + 60
+        ):
+            return str(_TOKEN_CACHE["token"])
+
+    token = _fetch_access_token(client_id, client_secret, environment)
+    with _TOKEN_LOCK:
+        _TOKEN_CACHE.update(
+            {
+                "key": cache_key,
+                "token": token,
+                "expires_at": now + 3300,
+            }
+        )
+    return token
+
+
+def _fetch_access_token(client_id: str, client_secret: str, environment: str) -> str:
     token_url = f"https://login.{environment}/oauth/token"
     form = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode("utf-8")
     request = urllib.request.Request(

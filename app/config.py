@@ -55,12 +55,22 @@ def pipeline_key_enforced() -> bool:
     """Ingest is manual-only; production should always require a pipeline key."""
     if os.getenv("REQUIRE_PIPELINE_KEY", "1").strip().lower() in {"0", "false", "no"}:
         return False
+    return is_production()
+
+
+def is_production() -> bool:
     return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
 
 
 def chat_api_key() -> str | None:
     value = os.getenv("CHAT_API_KEY", "").strip()
     return value or None
+
+
+def chat_key_enforced() -> bool:
+    if os.getenv("REQUIRE_CHAT_KEY", "1").strip().lower() in {"0", "false", "no"}:
+        return False
+    return is_production()
 
 
 def chat_title() -> str:
