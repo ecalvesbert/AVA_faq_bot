@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -119,6 +120,16 @@ def run_pipeline(
         try:
             data_dir().mkdir(parents=True, exist_ok=True)
             crawl_dir.mkdir(parents=True, exist_ok=True)
+
+            if not os.getenv("FIRECRAWL_API_KEY", "").strip():
+                on_railway = bool(
+                    os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID")
+                )
+                if on_railway:
+                    raise RuntimeError(
+                        "FIRECRAWL_API_KEY is required for crawls on Railway. "
+                        "Add it in Railway → ava-faq-chat → Variables, then retry ingest."
+                    )
 
             _run_step(
                 job,
