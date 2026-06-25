@@ -60,6 +60,13 @@ class ImportBundleRequest(BaseModel):
     files: list[ImportFileItem] = Field(min_length=1)
 
 
+class ContentFileResponse(BaseModel):
+    site: str
+    filename: str
+    processed: bool
+    content: str
+
+
 def require_chat_key(x_chat_key: Optional[str] = Header(default=None)) -> None:
     expected = config.chat_api_key()
     if expected and x_chat_key != expected:
@@ -200,13 +207,13 @@ def get_sync_state(_: None = Depends(require_pipeline_key)) -> dict[str, Any]:
     return pipeline.load_sync_state()
 
 
-@app.get("/api/content/sites/{site}/files/{filename}")
+@app.get("/api/content/sites/{site}/files/{filename}", response_model=ContentFileResponse)
 def get_site_file(
     site: str,
     filename: str,
     processed: bool = True,
     _: None = Depends(require_pipeline_key),
-) -> dict[str, str]:
+) -> ContentFileResponse:
     relative = f"processed/{filename}" if processed else filename
     try:
         content = pipeline.read_content_file(site, relative)
@@ -214,7 +221,12 @@ def get_site_file(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"site": site, "filename": filename, "processed": processed, "content": content}
+    return ContentFileResponse(
+        site=site,
+        filename=filename,
+        processed=processed,
+        content=content,
+    )
 
 
 @app.get("/admin")

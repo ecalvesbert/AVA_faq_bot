@@ -259,7 +259,7 @@ async function previewFile(filename) {
     document.getElementById("preview-title").textContent = filename;
     document.getElementById("preview-body").textContent = response.ok
       ? payload.content
-      : apiErrorMessage(payload, "Could not load file.");
+      : apiErrorMessage(payload, `Could not load file (HTTP ${response.status}).`);
   } catch (error) {
     document.getElementById("preview-body").textContent = error.message;
   }
